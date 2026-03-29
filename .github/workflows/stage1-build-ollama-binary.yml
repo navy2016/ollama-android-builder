@@ -1,0 +1,103 @@
+name: Stage 1 - Build Ollama Android ARM64 Binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      ollama_version:
+        description: 'Ollama version to build'
+        required: true
+        default: 'v0.18.3'
+
+env:
+  OLLAMA_VERSION: ${{ github.event.inputs.ollama_version || 'v0.18.3' }}
+
+jobs:
+  build-ollama-binary:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Ollama source
+      uses: actions/checkout@v4
+      with:
+        repository: ollama/ollama
+        ref: ${{ env.OLLAMA_VERSION }}
+        fetch-depth: 0
+        path: ollama-src
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+
+    - name: Install Android NDK
+      run: |
+        echo "Downloading Android NDK..."
+        wget -q https://dl.google.com/android/repository/android-ndk-r26c-linux.zip
+        unzip -q android-ndk-r26c-linux.zip
+        echo "ANDROID_NDK=$PWD/android-ndk-r26c" >> $GITHUB_ENV
+        echo "NDK installed"
+
+    - name: Setup build environment
+      run: |
+        export ANDROID_NDK=$PWD/android-ndk-r26c
+        export TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
+        export API=33
+        export TARGET=aarch64-linux-android
+        echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
+        echo "CC=$TOOLCHAIN/bin/${TARGET}${API}-clang" >> $GITHUB_ENV
+        echo "CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++" >> $GITHUB_ENV
+        echo "LD=$TOOLCHAIN/bin/ld" >> $GITHUB_ENV
+        echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
+        echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
+        echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
+        echo "API=$API" >> $GITHUB_ENV
+        echo "TARGET=$TARGET" >> $GITHUB_ENV
+
+    - name: Build llama.cpp for Android ARM64
+      working-directory: ./ollama-src
+      run: |
+        mkdir -p build/android
+        cd build/android
+        cmake ../../llama \\
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \\
+          -DANDROID_ABI=arm64-v8a \\
+          -DANDROID_PLATFORM=android-$API \\
+          -DCMAKE_BUILD_TYPE=Release \\
+          -DLLAMA_NATIVE=OFF \\
+          -DLLAMA_ARM_NEON=ON \\
+          -DLLAMA_BUILD_TESTS=OFF \\
+          -DLLAMA_BUILD_EXAMPLES=OFF \\
+          -DLLAMA_BUILD_SERVER=OFF \\
+          -G "Unix Makefiles"
+        make -j$(nproc)
+        echo "llama.cpp build complete"
+        ls -la
+
+    - name: Build Ollama binary
+      working-directory: ./ollama-src
+      run: |
+        export CGO_ENABLED=1
+        export GOOS=android
+        export GOARCH=arm64
+        export CGO_CFLAGS="-fPIC -O3 -DANDROID -I$PWD/llama/include"
+        export CGO_CXXFLAGS="$CGO_CFLAGS"
+        export CGO_LDFLAGS="-L$PWD/build/android -pie -lllama"
+        go build -v -ldflags="-s -w" \\
+          -o ollama-android-arm64 \\
+          ./cmd/ollama
+        file ollama-android-arm64
+        ls -lh ollama-android-arm64
+
+    - name: Prepare artifact
+      run: |
+        mkdir -p output/arm64-v8a
+        cp ollama-src/ollama-android-arm64 output/arm64-v8a/ollama
+        echo "${{ env.OLLAMA_VERSION }}" > output/arm64-v8a/version.txt
+        chmod +x output/arm64-v8a/ollama
+        cd output && tar -czf ollama-android-arm64.tar.gz arm64-v8a/
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ollama-android-arm64-binary
+        path: output/
+        retention-days: 30

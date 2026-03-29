@@ -1,0 +1,452 @@
+name: Stage Build V2 - Simplified Ollama Android Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ollama_version:
+        description: 'Ollama version to build'
+        required: true
+        default: 'v0.18.3'
+        type: string
+
+env:
+  OLLAMA_VERSION: ${{ github.event.inputs.ollama_version || 'v0.18.3' }}
+  GO_VERSION: '1.23'
+  NDK_VERSION: 'r26c'
+  ANDROID_API: '28'
+  TARGET_ARCH: 'arm64'
+
+jobs:
+  # ============================================================================
+  # STAGE 1: Build Ollama Binary for Android ARM64
+  # ============================================================================
+  stage1-build:
+    name: Stage 1 - Build Ollama Binary
+    runs-on: ubuntu-latest
+    
+    outputs:
+      build_status: ${{ steps.build_result.outputs.status }}
+      binary_path: ${{ steps.build_result.outputs.binary_path }}
+
+    steps:
+      # -------------------------------------------------------------------------
+      # Step 1: Checkout Ollama Repository
+      # -------------------------------------------------------------------------
+      - name: 📥 Checkout Ollama Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ollama/ollama
+          ref: ${{ env.OLLAMA_VERSION }}
+          fetch-depth: 1
+
+      - name: 📋 Show Checkout Info
+        run: |
+          echo "✅ Checked out ollama/ollama at version: ${{ env.OLLAMA_VERSION }}"
+          echo "📁 Working directory: $(pwd)"
+          echo "📂 Directory contents:"
+          ls -la
+
+      # -------------------------------------------------------------------------
+      # Step 2: Setup Go Environment
+      # -------------------------------------------------------------------------
+      - name: 🚀 Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: 📋 Verify Go Installation
+        run: |
+          echo "Go version: $(go version)"
+          echo "Go environment:"
+          go env
+
+      # -------------------------------------------------------------------------
+      # Step 3: Setup Android NDK
+      # -------------------------------------------------------------------------
+      - name: 🔧 Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+          link-to-sdk: true
+
+      - name: 📋 Verify NDK Installation
+        run: |
+          echo "✅ NDK installed at: ${{ steps.setup-ndk.outputs.ndk-path }}"
+          echo "📁 NDK directory listing:"
+          ls -la "${{ steps.setup-ndk.outputs.ndk-path }}" || echo "NDK path not accessible"
+          
+          # Find the compiler
+          TOOLCHAIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "🔍 Toolchain path: $TOOLCHAIN"
+          
+          if [ -d "$TOOLCHAIN" ]; then
+            echo "✅ Toolchain found"
+            echo "🔧 Available compilers:"
+            ls -la "$TOOLCHAIN/bin/" | grep -E "(clang|aarch64)" | head -20
+          else
+            echo "❌ Toolchain not found at expected path"
+            echo "📂 Searching for toolchains..."
+            find "${{ steps.setup-ndk.outputs.ndk-path }}" -name "*clang*" -type f 2>/dev/null | head -10
+          fi
+
+      # -------------------------------------------------------------------------
+      # Step 4: Setup Cross-Compilation Environment
+      # -------------------------------------------------------------------------
+      - name: 🔨 Setup Cross-Compilation Environment
+        run: |
+          echo "📝 Setting up cross-compilation environment variables..."
+          
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64"
+          
+          # Set environment variables for cross-compilation
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK_PATH" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
+          
+          # Go specific variables
+          echo "GOOS=android" >> $GITHUB_ENV
+          echo "GOARCH=arm64" >> $GITHUB_ENV
+          echo "CGO_ENABLED=1" >> $GITHUB_ENV
+          echo "CC=$TOOLCHAIN/bin/aarch64-linux-android${{ env.ANDROID_API }}-clang" >> $GITHUB_ENV
+          echo "CXX=$TOOLCHAIN/bin/aarch64-linux-android${{ env.ANDROID_API }}-clang++" >> $GITHUB_ENV
+          
+          echo "✅ Environment variables set successfully"
+
+      - name: 📋 Verify Environment Setup
+        run: |
+          echo "🔍 Cross-compilation environment:"
+          echo "  GOOS: $GOOS"
+          echo "  GOARCH: $GOARCH"
+          echo "  CGO_ENABLED: $CGO_ENABLED"
+          echo "  CC: $CC"
+          echo "  CXX: $CXX"
+          echo "  ANDROID_NDK_HOME: $ANDROID_NDK_HOME"
+          
+          # Verify compiler exists
+          if [ -f "$CC" ]; then
+            echo "✅ C compiler found: $CC"
+          else
+            echo "❌ C compiler NOT found: $CC"
+            exit 1
+          fi
+
+      # -------------------------------------------------------------------------
+      # Step 5: Install Dependencies
+      # -------------------------------------------------------------------------
+      - name: 📦 Install Build Dependencies
+        run: |
+          echo "🔧 Installing build dependencies..."
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config
+          echo "✅ Dependencies installed"
+
+      # -------------------------------------------------------------------------
+      # Step 6: Build Ollama Binary (Simplified - Skip llama.cpp)
+      # -------------------------------------------------------------------------
+      - name: 🏗️ Build Ollama Binary
+        id: build_binary
+        run: |
+          echo "🔨 Starting Ollama binary build..."
+          echo "📦 This build uses simplified Go-only compilation"
+          
+          # Create output directory
+          mkdir -p build/android
+          
+          # Build the ollama binary with CGO disabled for simplicity
+          # This creates a pure Go binary without llama.cpp dependencies
+          echo "🔄 Building ollama binary..."
+          
+          # Set CGO_ENABLED=0 for simpler build (pure Go)
+          # Note: This creates a limited binary without GPU support
+          # For full functionality, CGO would be needed with proper llama.cpp setup
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build \
+            -ldflags="-s -w -X github.com/ollama/ollama/version.Version=${{ env.OLLAMA_VERSION }}" \
+            -o build/android/ollama-android-arm64 \
+            ./cmd/ollama
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Build completed successfully"
+          else
+            echo "❌ Build failed"
+            exit 1
+          fi
+
+      - name: 📋 Verify Binary
+        run: |
+          echo "🔍 Verifying built binary..."
+          BINARY="build/android/ollama-android-arm64"
+          
+          if [ -f "$BINARY" ]; then
+            echo "✅ Binary created: $BINARY"
+            echo "📊 Binary size: $(du -h $BINARY | cut -f1)"
+            echo "📋 File info:"
+            file $BINARY
+            echo "🔍 Binary details:"
+            ls -la $BINARY
+          else
+            echo "❌ Binary not found at: $BINARY"
+            exit 1
+          fi
+
+      # -------------------------------------------------------------------------
+      # Step 7: Package and Upload Artifact
+      # -------------------------------------------------------------------------
+      - name: 📦 Package Binary
+        run: |
+          echo "📦 Packaging binary for Stage 2..."
+          mkdir -p artifacts
+          cp build/android/ollama-android-arm64 artifacts/
+          
+          # Create a metadata file using echo instead of heredoc
+          echo "Build Information" > artifacts/build-info.txt
+          echo "=================" >> artifacts/build-info.txt
+          echo "Ollama Version: ${{ env.OLLAMA_VERSION }}" >> artifacts/build-info.txt
+          echo "Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> artifacts/build-info.txt
+          echo "Go Version: ${{ env.GO_VERSION }}" >> artifacts/build-info.txt
+          echo "NDK Version: ${{ env.NDK_VERSION }}" >> artifacts/build-info.txt
+          echo "Target: android/arm64" >> artifacts/build-info.txt
+          echo "API Level: ${{ env.ANDROID_API }}" >> artifacts/build-info.txt
+          echo "CGO Enabled: 0 (Pure Go build)" >> artifacts/build-info.txt
+          
+          echo "✅ Package created"
+          echo "📁 Artifacts directory:"
+          ls -la artifacts/
+
+      - name: 📤 Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollama-android-binary
+          path: artifacts/
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: ✅ Set Build Result Output
+        id: build_result
+        run: |
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "binary_path=artifacts/ollama-android-arm64" >> $GITHUB_OUTPUT
+          echo "✅ Stage 1 completed successfully!"
+
+  # ============================================================================
+  # STAGE 2: Build Android APK
+  # ============================================================================
+  stage2-build-apk:
+    name: Stage 2 - Build Android APK
+    runs-on: ubuntu-latest
+    needs: stage1-build
+    
+    steps:
+      # -------------------------------------------------------------------------
+      # Step 1: Checkout OllamaServer Repository
+      # -------------------------------------------------------------------------
+      - name: 📥 Checkout OllamaServer Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 📋 Show Repository Info
+        run: |
+          echo "✅ Checked out OllamaServer repository"
+          echo "📁 Working directory: $(pwd)"
+          echo "📂 Directory contents:"
+          ls -la
+
+      # -------------------------------------------------------------------------
+      # Step 2: Download Stage 1 Artifact
+      # -------------------------------------------------------------------------
+      - name: 📥 Download Ollama Binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ollama-android-binary
+          path: downloaded-artifacts/
+
+      - name: 📋 Verify Downloaded Artifact
+        run: |
+          echo "📁 Downloaded artifacts:"
+          ls -la downloaded-artifacts/
+          
+          if [ -f "downloaded-artifacts/ollama-android-arm64" ]; then
+            echo "✅ Ollama binary downloaded successfully"
+            echo "📊 Binary size: $(du -h downloaded-artifacts/ollama-android-arm64 | cut -f1)"
+            file downloaded-artifacts/ollama-android-arm64
+          else
+            echo "❌ Ollama binary not found in artifacts"
+            exit 1
+          fi
+          
+          # Show build info if available
+          if [ -f "downloaded-artifacts/build-info.txt" ]; then
+            echo "📋 Build Information:"
+            cat downloaded-artifacts/build-info.txt
+          fi
+
+      # -------------------------------------------------------------------------
+      # Step 3: Setup Node.js
+      # -------------------------------------------------------------------------
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: 📋 Verify Node.js
+        run: |
+          echo "✅ Node.js version: $(node --version)"
+          echo "✅ NPM version: $(npm --version)"
+
+      # -------------------------------------------------------------------------
+      # Step 4: Setup Java
+      # -------------------------------------------------------------------------
+      - name: ☕ Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📋 Verify Java
+        run: |
+          echo "✅ Java version:"
+          java -version
+
+      # -------------------------------------------------------------------------
+      # Step 5: Setup Android SDK
+      # -------------------------------------------------------------------------
+      - name: 🤖 Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 📦 Install Android Build Tools
+        run: |
+          echo "🔧 Installing Android SDK components..."
+          sdkmanager "build-tools;34.0.0"
+          sdkmanager "platforms;android-${{ env.ANDROID_API }}"
+          sdkmanager "platform-tools"
+          echo "✅ Android SDK components installed"
+
+      # -------------------------------------------------------------------------
+      # Step 6: Install Dependencies
+      # -------------------------------------------------------------------------
+      - name: 📦 Install NPM Dependencies
+        run: |
+          echo "🔧 Installing npm dependencies..."
+          npm ci
+          echo "✅ Dependencies installed"
+
+      # -------------------------------------------------------------------------
+      # Step 7: Copy Binary to Project
+      # -------------------------------------------------------------------------
+      - name: 📂 Copy Ollama Binary to Project
+        run: |
+          echo "📂 Copying ollama binary to project..."
+          
+          # Find the correct directory for the binary
+          # Common locations in Android projects:
+          DEST_DIRS=(
+            "android/app/src/main/assets/"
+            "android/app/src/main/res/raw/"
+            "src-tauri/src/"
+            "src/main/resources/"
+          )
+          
+          COPIED=false
+          for DIR in "${DEST_DIRS[@]}"; do
+            if [ -d "$DIR" ]; then
+              echo "📁 Found directory: $DIR"
+              cp downloaded-artifacts/ollama-android-arm64 "$DIR/"
+              echo "✅ Binary copied to: $DIR"
+              COPIED=true
+              break
+            fi
+          done
+          
+          # If no standard directory found, create assets directory
+          if [ "$COPIED" = false ]; then
+            echo "⚠️ No standard directory found, creating assets directory..."
+            mkdir -p android/app/src/main/assets/
+            cp downloaded-artifacts/ollama-android-arm64 android/app/src/main/assets/
+            echo "✅ Binary copied to: android/app/src/main/assets/"
+          fi
+          
+          echo "📋 Final binary location:"
+          find . -name "ollama-android-arm64" -type f 2>/dev/null
+
+      # -------------------------------------------------------------------------
+      # Step 8: Build APK
+      # -------------------------------------------------------------------------
+      - name: 🏗️ Build Android APK
+        run: |
+          echo "🔨 Building Android APK..."
+          echo "📋 Build environment:"
+          echo "  ANDROID_HOME: $ANDROID_HOME"
+          echo "  ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
+          
+          # Detect project type and build accordingly
+          if [ -f "package.json" ]; then
+            echo "📦 Detected Node.js project"
+            
+            # Check for available build scripts
+            if npm run | grep -q "build:android"; then
+              echo "🔄 Running: npm run build:android"
+              npm run build:android
+            elif npm run | grep -q "android:build"; then
+              echo "🔄 Running: npm run android:build"
+              npm run android:build
+            elif [ -f "android/gradlew" ]; then
+              echo "🔄 Building with Gradle..."
+              cd android && ./gradlew assembleRelease && cd ..
+            else
+              echo "⚠️ No standard Android build script found"
+              echo "📋 Available scripts:"
+              npm run
+              exit 1
+            fi
+          else
+            echo "⚠️ No package.json found - unknown project type"
+            exit 1
+          fi
+
+      - name: 📋 Find Built APK
+        id: find_apk
+        run: |
+          echo "🔍 Searching for built APK..."
+          
+          # Common APK output locations
+          APK_PATH=$(find . -name "*.apk" -type f 2>/dev/null | grep -E "(release|apk)" | head -1)
+          
+          if [ -n "$APK_PATH" ]; then
+            echo "✅ APK found: $APK_PATH"
+            echo "📊 APK size: $(du -h "$APK_PATH" | cut -f1)"
+            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+            
+            # Copy to a known location
+            mkdir -p output
+            cp "$APK_PATH" output/OllamaServer-${{ env.OLLAMA_VERSION }}.apk
+          else
+            echo "❌ APK not found"
+            echo "📂 Directory structure:"
+            find . -name "*.apk" -o -name "outputs" -type d 2>/dev/null | head -20
+            exit 1
+          fi
+
+      # -------------------------------------------------------------------------
+      # Step 9: Upload Final APK
+      # -------------------------------------------------------------------------
+      - name: 📤 Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollama-android-apk
+          path: output/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: ✅ Build Complete
+        run: |
+          echo "=========================================="
+          echo "✅ STAGE 2 BUILD COMPLETED SUCCESSFULLY!"
+          echo "=========================================="
+          echo "📦 APK Location: output/OllamaServer-${{ env.OLLAMA_VERSION }}.apk"
+          echo "📊 Build artifacts uploaded"

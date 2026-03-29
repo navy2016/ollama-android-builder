@@ -1,0 +1,93 @@
+name: Build Optimized APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout OllamaServer
+      uses: actions/checkout@v4
+      with:
+        repository: sunshine0523/OllamaServer
+        path: OllamaServer
+
+    - name: Download optimized code
+      uses: actions/checkout@v4
+      with:
+        repository: MZHlongchu/ollama-server-optimized
+        path: optimized
+        token: ${{ secrets.PAT }}
+      continue-on-error: true
+
+    - name: Apply optimizations
+      run: |
+        # 如果优化代码仓库存在，替换文件
+        if [ -d "optimized" ]; then
+          echo "Applying optimized code..."
+          cp -r optimized/* OllamaServer/ || true
+        fi
+        
+        # 确保 ollama 二进制文件目录存在
+        mkdir -p OllamaServer/android/app/src/main/assets/arm64-v8a
+        echo "0.18.3" > OllamaServer/android/app/src/main/assets/arm64-v8a/version.txt
+        
+        # 列出目录结构
+        ls -la OllamaServer/
+
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: OllamaServer/package.json
+
+    - name: Install dependencies
+      working-directory: ./OllamaServer
+      run: |
+        npm ci || npm install
+
+    - name: Build APK
+      working-directory: ./OllamaServer/android
+      run: |
+        chmod +x gradlew
+        ./gradlew assembleRelease --no-daemon --stacktrace
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OllamaServer-Release
+        path: OllamaServer/android/app/build/outputs/apk/release/*.apk
+        retention-days: 30
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      if: success()
+      with:
+        tag_name: v0.0.5-optimized
+        name: OllamaServer v0.0.5 Optimized
+        body: |
+          Optimized OllamaServer APK
+          
+          ## Features
+          - Localhost-only mode (security improved)
+          - Performance optimizations
+          - Model size detection
+          
+          ## Installation
+          1. Download the APK
+          2. Install on Android device (Android 8.0+)
+          3. Allow installation from unknown sources if prompted
+        files: OllamaServer/android/app/build/outputs/apk/release/*.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

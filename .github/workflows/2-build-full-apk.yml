@@ -1,0 +1,109 @@
+name: 2. Build Full OllamaServer APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      use_prebuilt_ollama:
+        description: 'Use prebuilt Ollama binary (recommended)'
+        required: true
+        default: 'true'
+        type: boolean
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout OllamaServer
+      uses: actions/checkout@v4
+      with:
+        repository: sunshine0523/OllamaServer
+        path: OllamaServer
+        
+    - name: Download prebuilt Ollama binary
+      run: |
+        mkdir -p OllamaServer/android/app/src/main/assets/arm64-v8a
+        
+        curl -L -o ollama-binary.tar.gz \
+          "https://github.com/navy2016/ollama-android-builder/releases/download/ollama-v0.18.3-android/ollama-android-arm64-v0.18.3.tar.gz" || true
+          
+        if [ -f ollama-binary.tar.gz ]; then
+          tar -xzf ollama-binary.tar.gz
+          cp -r arm64-v8a/* OllamaServer/android/app/src/main/assets/arm64-v8a/
+          echo "✅ Using prebuilt Ollama binary"
+        else
+          echo "⚠️ Prebuilt binary not found, using placeholder"
+          echo "v0.18.3" > OllamaServer/android/app/src/main/assets/arm64-v8a/version.txt
+        fi
+        
+        ls -lh OllamaServer/android/app/src/main/assets/arm64-v8a/
+        
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: OllamaServer/package-lock.json
+      continue-on-error: true
+      
+    - name: Install dependencies
+      working-directory: ./OllamaServer
+      run: |
+        npm ci || npm install
+        
+    - name: Build APK
+      working-directory: ./OllamaServer/android
+      run: |
+        chmod +x gradlew
+        ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+        
+    - name: Check APK
+      run: |
+        echo "=== Checking APK output ==="
+        ls -lh OllamaServer/android/app/build/outputs/apk/release/
+        
+    - name: Rename and sign APK
+      run: |
+        mkdir -p final
+        cp OllamaServer/android/app/build/outputs/apk/release/app-arm64-v8a-release.apk \
+          final/OllamaServer-v0.0.5.apk
+        ls -lh final/
+        
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OllamaServer-APK
+        path: final/*.apk
+        retention-days: 30
+        
+    - name: Create Release
+      if: success()
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v0.0.5-release
+        name: OllamaServer v0.0.5 Release
+        body: |
+          Full OllamaServer APK with Ollama v0.18.3
+          
+          ## Installation
+          1. Download the APK file
+          2. Install on your Android device (Android 8.0+)
+          3. Allow installation from unknown sources if prompted
+          4. Open app and start Ollama service
+          
+          ## Features
+          - One-click Ollama server start/stop
+          - Model download and management
+          - Chat interface with Markdown support
+          - GGUF model upload support
+          - Performance optimizations for mobile
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

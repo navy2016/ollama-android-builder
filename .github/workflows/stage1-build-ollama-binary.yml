@@ -28,13 +28,20 @@ jobs:
       with:
         go-version: '1.23'
 
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential git wget unzip
+
     - name: Install Android NDK
       run: |
-        echo "Downloading Android NDK..."
+        echo "Downloading Android NDK r26c..."
         wget -q https://dl.google.com/android/repository/android-ndk-r26c-linux.zip
+        echo "Unzipping NDK..."
         unzip -q android-ndk-r26c-linux.zip
-        echo "ANDROID_NDK=$PWD/android-ndk-r26c" >> $GITHUB_ENV
-        echo "NDK installed"
+        export ANDROID_NDK=$PWD/android-ndk-r26c
+        echo "ANDROID_NDK=$ANDROID_NDK" >> $GITHUB_ENV
+        echo "✅ NDK installed"
 
     - name: Setup build environment
       run: |
@@ -42,49 +49,96 @@ jobs:
         export TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
         export API=33
         export TARGET=aarch64-linux-android
+        
         echo "AR=$TOOLCHAIN/bin/llvm-ar" >> $GITHUB_ENV
-        echo "CC=$TOOLCHAIN/bin/${TARGET}${API}-clang" >> $GITHUB_ENV
+        echo "CC=$TOOLCHAIN/bin/${TARGET}$API-clang" >> $GITHUB_ENV
         echo "CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++" >> $GITHUB_ENV
+        echo "AS=$TOOLCHAIN/bin/llvm-as" >> $GITHUB_ENV
         echo "LD=$TOOLCHAIN/bin/ld" >> $GITHUB_ENV
         echo "RANLIB=$TOOLCHAIN/bin/llvm-ranlib" >> $GITHUB_ENV
         echo "STRIP=$TOOLCHAIN/bin/llvm-strip" >> $GITHUB_ENV
         echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
         echo "API=$API" >> $GITHUB_ENV
         echo "TARGET=$TARGET" >> $GITHUB_ENV
+        
+        # Verify
+        echo "Verifying compiler..."
+        $TOOLCHAIN/bin/${TARGET}$API-clang --version
 
     - name: Build llama.cpp for Android ARM64
       working-directory: ./ollama-src
       run: |
+        echo "Creating build directory..."
         mkdir -p build/android
         cd build/android
+        
+        echo "Running CMake configuration..."
         cmake ../../llama \\
           -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \\
-          -DANDROID_ABI=arm64-v8a \\
-          -DANDROID_PLATFORM=android-$API \\
-          -DCMAKE_BUILD_TYPE=Release \\
-          -DLLAMA_NATIVE=OFF \\
-          -DLLAMA_ARM_NEON=ON \\
-          -DLLAMA_BUILD_TESTS=OFF \\
-          -DLLAMA_BUILD_EXAMPLES=OFF \\
-          -DLLAMA_BUILD_SERVER=OFF \\
-          -G "Unix Makefiles"
-        make -j$(nproc)
-        echo "llama.cpp build complete"
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-$API \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLAMA_NATIVE=OFF \
+          -DLLAMA_ARM_NEON=ON \
+          -DLLAMA_BUILD_TESTS=OFF \
+          -DLLAMA_BUILD_EXAMPLES=OFF \
+          -DLLAMA_BUILD_SERVER=OFF \
+          -DLLAMA_STANDALONE=OFF \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -G "Unix Makefiles" 2>&1 | tee cmake.log
+        
+        echo "CMake exit code: $?"
+        
+        echo "Building with make..."
+        make -j$(nproc) 2>&1 | tee make.log
+        MAKE_EXIT=$?
+        echo "Make exit code: $MAKE_EXIT"
+        
+        if [ $MAKE_EXIT -ne 0 ]; then
+          echo "Build failed! Showing last 50 lines of make.log:"
+          tail -50 make.log
+          exit 1
+        fi
+        
+        echo "Listing build outputs:"
         ls -la
 
     - name: Build Ollama binary
       working-directory: ./ollama-src
       run: |
+        echo "Setting up Go environment..."
         export CGO_ENABLED=1
         export GOOS=android
         export GOARCH=arm64
         export CGO_CFLAGS="-fPIC -O3 -DANDROID -I$PWD/llama/include"
         export CGO_CXXFLAGS="$CGO_CFLAGS"
-        export CGO_LDFLAGS="-L$PWD/build/android -pie -lllama"
-        go build -v -ldflags="-s -w" \\
-          -o ollama-android-arm64 \\
-          ./cmd/ollama
+        export CGO_LDFLAGS="-L$PWD/build/android -pie -lllama -lstdc++ -lm -ldl"
+        
+        echo "Environment:"
+        echo "CGO_ENABLED=$CGO_ENABLED"
+        echo "GOOS=$GOOS"
+        echo "GOARCH=$GOARCH">
+        echo "CC=$CC"
+        
+        echo "Building Ollama binary..."
+        go build -v -ldflags="-s -w -linkmode external -extldflags '-static'" \
+          -o ollama-android-arm64 \
+          ./cmd/ollama 2>&1 | tee build.log
+        
+        BUILD_EXIT=${PIPESTATUS[0]}
+        echo "Build exit code: $BUILD_EXIT"
+        
+        if [ $BUILD_EXIT -ne 0 ]; then
+          echo "Build failed! Showing last 100 lines of build.log:"
+          tail -100 build.log
+          exit 1
+        fi
+        
+        echo "Build successful!"
         file ollama-android-arm64
+        ls -lh ollama-android-arm64
+        $STRIP ollama-android-arm64
         ls -lh ollama-android-arm64
 
     - name: Prepare artifact
@@ -93,11 +147,37 @@ jobs:
         cp ollama-src/ollama-android-arm64 output/arm64-v8a/ollama
         echo "${{ env.OLLAMA_VERSION }}" > output/arm64-v8a/version.txt
         chmod +x output/arm64-v8a/ollama
+        
+        echo "Artifact contents:"
+        ls -la output/arm64-v8a/
+        file output/arm64-v8a/ollama
+        
         cd output && tar -czf ollama-android-arm64.tar.gz arm64-v8a/
+        echo "Tarball created:"
+        ls -lh *.tar.gz
 
     - name: Upload binary artifact
       uses: actions/upload-artifact@v4
+      if: always()
       with:
         name: ollama-android-arm64-binary
         path: output/
         retention-days: 30
+
+    - name: Create Release
+      if: success()
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ollama-${{ env.OLLAMA_VERSION }}-android-arm64
+        name: Ollama ${{ env.OLLAMA_VERSION }} Android ARM64
+        body: |
+          Prebuilt Ollama ${{ env.OLLAMA_VERSION }} for Android ARM64
+          
+          ## Build Info
+          - Version: ${{ env.OLLAMA_VERSION }}
+          - Target: arm64-v8a
+          - API Level: 33
+        files: |
+          output/ollama-android-arm64.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

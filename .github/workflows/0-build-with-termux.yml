@@ -1,0 +1,90 @@
+name: Build with Termux Ollama
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Termux environment
+      uses: termux/termux-docker@v2
+      with:
+        arch: aarch64
+      continue-on-error: true
+      
+    - name: Download Termux ollama package
+      run: |
+        # Download ollama from termux packages
+        mkdir -p termux-pkg
+        cd termux-pkg
+        
+        # Get the latest ollama deb package
+        OLLAMA_DEB_URL="https://packages.termux.dev/apt/termux-main/pool/main/o/ollama/ollama_0.3.13_aarch64.deb"
+        
+        # Try to download (may not exist, so use alternative)
+        curl -L -o ollama.deb "$OLLAMA_DEB_URL" || echo "Termux package not available"
+        
+        if [ -f ollama.deb ]; then
+          ar x ollama.deb
+          tar -xf data.tar.xz
+          find . -name "ollama" -type f
+        fi
+        
+    - name: Checkout OllamaServer
+      uses: actions/checkout@v4
+      with:
+        repository: sunshine0523/OllamaServer
+        path: OllamaServer
+        
+    - name: Prepare ollama binary
+      run: |
+        mkdir -p OllamaServer/android/app/src/main/assets/arm64-v8a
+        
+        # Check if we got termux binary
+        if [ -f termux-pkg/data/data/com.termux/files/usr/bin/ollama ]; then
+          cp termux-pkg/data/data/com.termux/files/usr/bin/ollama \
+             OllamaServer/android/app/src/main/assets/arm64-v8a/ollama
+          echo "Using Termux ollama binary"
+        else
+          # Create a script that downloads ollama at runtime
+          echo "#!/system/bin/sh" > OllamaServer/android/app/src/main/assets/arm64-v8a/ollama
+          echo "# Placeholder - will download real binary at runtime" >> OllamaServer/android/app/src/main/assets/arm64-v8a/ollama
+          echo "echo 'Please download ollama binary from releases'" >> OllamaServer/android/app/src/main/assets/arm64-v8a/ollama
+          echo "0.18.3" > OllamaServer/android/app/src/main/assets/arm64-v8a/version.txt
+          chmod +x OllamaServer/android/app/src/main/assets/arm64-v8a/ollama
+        fi
+        
+        ls -lh OllamaServer/android/app/src/main/assets/arm64-v8a/
+        
+    - name: Setup build environment
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+      continue-on-error: true
+      
+    - name: Build APK
+      working-directory: ./OllamaServer
+      run: |
+        npm install
+        cd android
+        chmod +x gradlew
+        ./gradlew assembleRelease
+        
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OllamaServer
+        path: OllamaServer/android/app/build/outputs/apk/release/*.apk

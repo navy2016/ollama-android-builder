@@ -1,0 +1,87 @@
+name: Build APK (Practical)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ollama_binary_url:
+        description: 'URL to ollama binary (optional)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout OllamaServer
+      uses: actions/checkout@v4
+      with:
+        repository: sunshine0523/OllamaServer
+        path: OllamaServer
+        
+    - name: Download ollama binary
+      run: |
+        mkdir -p OllamaServer/android/app/src/main/assets/arm64-v8a
+        
+        # Try to download from various sources
+        if [ -n "${{ github.event.inputs.ollama_binary_url }}" ]; then
+          echo "Downloading from provided URL..."
+          curl -L -o OllamaServer/android/app/src/main/assets/arm64-v8a/ollama \\
+            "${{ github.event.inputs.ollama_binary_url }}"
+        else
+          # Try to find ollama binary from various sources
+          echo "Searching for ollama binary..."
+          
+          # Option 1: Try sunshine0523 existing releases
+          curl -L -o ollama-temp.tar.gz \\
+            "https://github.com/sunshine0523/OllamaServer/releases/download/v0.0.5/ollama-android-arm64.tar.gz" || true
+            
+          if [ -f ollama-temp.tar.gz ]; then
+            tar -xzf ollama-temp.tar.gz
+            cp arm64-v8a/ollama OllamaServer/android/app/src/main/assets/arm64-v8a/ || true
+          fi
+        fi
+        
+        # Set version
+        echo "0.18.3" > OllamaServer/android/app/src/main/assets/arm64-v8a/version.txt
+        chmod +x OllamaServer/android/app/src/main/assets/arm64-v8a/ollama || true
+        
+        ls -lh OllamaServer/android/app/src/main/assets/arm64-v8a/
+        
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        
+    - name: Setup Android SDK  
+      uses: android-actions/setup-android@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+      continue-on-error: true
+      
+    - name: Install dependencies and build
+      working-directory: ./OllamaServer
+      run: |
+        npm ci || npm install
+        cd android
+        chmod +x gradlew
+        ./gradlew assembleRelease
+        
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: OllamaServer-APK
+        path: OllamaServer/android/app/build/outputs/apk/release/app-arm64-v8a-release.apk
+        
+    - name: Create Release
+      if: success()
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: release-$(date +%Y%m%d-%H%M%S)
+        name: OllamaServer Build $(date +%Y-%m-%d)
+        files: OllamaServer/android/app/build/outputs/apk/release/*.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

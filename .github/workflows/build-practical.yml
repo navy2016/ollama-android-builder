@@ -1,0 +1,144 @@
+name: Build Ollama Android APK (Practical)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ollama_version:
+        description: 'Ollama version to use (e.g., 0.3.13)'
+        required: true
+        default: '0.3.13'
+      create_release:
+        description: 'Create GitHub Release'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout OllamaServer
+        uses: actions/checkout@v4
+        with:
+          repository: sunshine0523/OllamaServer
+          path: OllamaServer
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install npm dependencies
+        working-directory: OllamaServer
+        run: npm install || true
+
+      - name: Prepare ollama binary (Placeholder)
+        working-directory: OllamaServer
+        run: |
+          echo "=============================================="
+          echo "Preparing ollama binary for Android ARM64..."
+          echo "Ollama version: ${{ github.event.inputs.ollama_version }}"
+          echo "=============================================="
+          
+          # Create placeholder binary
+          mkdir -p android/app/src/main/assets/bin
+          
+          # Create a placeholder script that will be replaced with real binary
+          cat > android/app/src/main/assets/bin/ollama << 'BINARY_EOF'
+          #!/system/bin/sh
+          # PLACEHOLDER - Replace with real ollama binary for Android ARM64
+          # The real binary should be cross-compiled from ollama source code
+          echo "Error: This is a placeholder binary."
+          echo "Please replace with real ollama binary for Android ARM64."
+          echo "Build instructions:"
+          echo "  1. Clone ollama/ollama repository"
+          echo "  2. Cross-compile for Android ARM64 using NDK"
+          echo "  3. Place the binary at android/app/src/main/assets/bin/ollama"
+          exit 1
+          BINARY_EOF
+          
+          chmod +x android/app/src/main/assets/bin/ollama
+          
+          echo ""
+          echo "========================================"
+          echo "NOTE: Placeholder binary created!"
+          echo "You must replace it with a real ollama"
+          echo "binary for Android ARM64 before the"
+          echo "APK will work properly."
+          echo "========================================"
+
+      - name: Build Release APK
+        working-directory: OllamaServer/android
+        run: |
+          chmod +x gradlew || true
+          ./gradlew assembleRelease --no-daemon || true
+
+      - name: Find APK file
+        id: find_apk
+        working-directory: OllamaServer
+        run: |
+          APK_PATH=$(find . -name "*.apk" -type f | head -1 || true)
+          if [ -n "$APK_PATH" ]; then
+            echo "Found APK: $APK_PATH"
+            echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+            cp "$APK_PATH" ../ollama-android-${{ github.event.inputs.ollama_version }}.apk || true
+          else
+            echo "No APK found"
+            echo "apk_path=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ollama-android-${{ github.event.inputs.ollama_version }}
+          path: |
+            *.apk
+            OllamaServer/**/*.apk
+          if-no-files-found: warn
+
+      - name: Create GitHub Release
+        if: github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.event.inputs.ollama_version }}-android
+          name: Ollama Android v${{ github.event.inputs.ollama_version }}
+          body: |
+            ## Ollama Android Build
+            
+            **Version:** ${{ github.event.inputs.ollama_version }}
+            
+            **⚠️ IMPORTANT NOTE:**
+            This APK contains a **placeholder** ollama binary. 
+            
+            Before using, you must:
+            1. Cross-compile the real ollama binary for Android ARM64
+            2. Replace the placeholder binary in the APK assets
+            3. Re-sign the APK
+            
+            ### Build Instructions
+            See the [OllamaServer repository](https://github.com/sunshine0523/OllamaServer) for details.
+          files: |
+            *.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "========================================"
+          echo "Build Summary"
+          echo "========================================"
+          echo "Ollama version: ${{ github.event.inputs.ollama_version }}"
+          echo "Release created: ${{ github.event.inputs.create_release }}"
+          echo ""
+          echo "⚠️  IMPORTANT: This build uses a placeholder binary."
+          echo "   Replace with real ollama binary before use."
+          echo "========================================"

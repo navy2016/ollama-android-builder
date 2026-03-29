@@ -1,0 +1,221 @@
+name: Build OllamaServer APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      ollama_version:
+        description: 'Ollama version to build (e.g., v0.18.3)'
+        required: true
+        default: 'v0.18.3'
+
+env:
+  OLLAMA_VERSION: ${{ github.event.inputs.ollama_version || 'v0.18.3' }}
+  ANDROID_API_LEVEL: 33
+  NDK_VERSION: r26c
+
+jobs:
+  build-ollama-binary:
+    name: Build Ollama Android ARM64 Binary
+    runs-on: ubuntu-latest
+    outputs:
+      ollama-binary-path: ${{ steps.save-binary.outputs.path }}
+    steps:
+    - name: Checkout Ollama source
+      uses: actions/checkout@v4
+      with:
+        repository: ollama/ollama
+        ref: ${{ env.OLLAMA_VERSION }}
+        fetch-depth: 0
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Setup Android NDK
+      run: |
+        wget -q https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux.zip
+        unzip -q android-ndk-${{ env.NDK_VERSION }}-linux.zip
+        echo "ANDROID_NDK=$PWD/android-ndk-${{ env.NDK_VERSION }}" >> $GITHUB_ENV
+        echo "$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build
+
+    - name: Setup Android toolchain
+      run: |
+        export CC=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${{ env.ANDROID_API_LEVEL }}-clang
+        export CXX=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android${{ env.ANDROID_API_LEVEL }}-clang++
+        export AR=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+        export LD=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/ld
+        export RANLIB=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+        export STRIP=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip
+        export CFLAGS="-fPIC -O3 -DANDROID -D__ANDROID_API__=${{ env.ANDROID_API_LEVEL }}"
+        export CXXFLAGS="$CFLAGS"
+        export LDFLAGS="-pie"
+        
+        echo "CC=$CC" >> $GITHUB_ENV
+        echo "CXX=$CXX" >> $GITHUB_ENV
+        echo "AR=$AR" >> $GITHUB_ENV
+        echo "LD=$LD" >> $GITHUB_ENV
+        echo "RANLIB=$RANLIB" >> $GITHUB_ENV
+        echo "STRIP=$STRIP" >> $GITHUB_ENV
+        echo "CFLAGS=$CFLAGS" >> $GITHUB_ENV
+        echo "CXXFLAGS=$CXXFLAGS" >> $GITHUB_ENV
+        echo "LDFLAGS=$LDFLAGS" >> $GITHUB_ENV
+
+    - name: Build llama.cpp
+      run: |
+        mkdir -p build/android_arm64
+        cd build/android_arm64
+        cmake ../../llama \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-${{ env.ANDROID_API_LEVEL }} \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DLLAMA_NATIVE=OFF \
+          -DLLAMA_ARM_NEON=ON \
+          -DLLAMA_OPENMP=OFF \
+          -GNinja
+        ninja
+
+    - name: Build Ollama binary
+      run: |
+        export GOOS=android
+        export GOARCH=arm64
+        export CGO_ENABLED=1
+        export CGO_CFLAGS="$CFLAGS"
+        export CGO_CXXFLAGS="$CXXFLAGS"
+        export CGO_LDFLAGS="$LDFLAGS"
+        
+        go build -ldflags="-s -w" -o ollama-android-arm64 ./cmd/ollama
+        $STRIP ollama-android-arm64
+        
+        file ollama-android-arm64
+        ls -lh ollama-android-arm64
+
+    - name: Save binary
+      id: save-binary
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/ollama-binary/arm64-v8a
+        cp ollama-android-arm64 $GITHUB_WORKSPACE/ollama-binary/arm64-v8a/ollama
+        echo "${{ env.OLLAMA_VERSION }}" > $GITHUB_WORKSPACE/ollama-binary/arm64-v8a/version.txt
+        chmod +x $GITHUB_WORKSPACE/ollama-binary/arm64-v8a/ollama
+        ls -lh $GITHUB_WORKSPACE/ollama-binary/arm64-v8a/
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ollama-binary
+        path: ${{ github.workspace }}/ollama-binary/
+        retention-days: 1
+
+  build-apk:
+    name: Build APK
+    runs-on: ubuntu-latest
+    needs: build-ollama-binary
+    steps:
+    - name: Checkout OllamaServer source
+      uses: actions/checkout@v4
+      with:
+        repository: sunshine0523/OllamaServer
+        path: OllamaServer
+
+    - name: Download Ollama binary
+      uses: actions/download-artifact@v4
+      with:
+        name: ollama-binary
+        path: downloaded-binary
+
+    - name: Setup JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install NDK
+      run: |
+        sdkmanager "ndk;26.2.11394342"
+        echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.2.11394342" >> $GITHUB_ENV
+
+    - name: Copy Ollama binary to project
+      run: |
+        ls -la downloaded-binary/
+        mkdir -p OllamaServer/android/app/src/main/assets/arm64-v8a
+        cp downloaded-binary/arm64-v8a/* OllamaServer/android/app/src/main/assets/arm64-v8a/
+        ls -lh OllamaServer/android/app/src/main/assets/arm64-v8a/
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      working-directory: ./OllamaServer
+      run: |
+        npm install
+
+    - name: Build APK
+      working-directory: ./OllamaServer/android
+      run: |
+        chmod +x gradlew
+        ./gradlew assembleRelease
+
+    - name: Sign APK
+      uses: r0adkll/sign-android-release@v1
+      id: sign_apk
+      with:
+        releaseDirectory: OllamaServer/android/app/build/outputs/apk/release
+        signingKeyBase64: ${{ secrets.SIGNING_KEY }}
+        alias: ${{ secrets.ALIAS }}
+        keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
+        keyPassword: ${{ secrets.KEY_PASSWORD }}
+      env:
+        BUILD_TOOLS_VERSION: "34.0.0"
+
+    - name: Rename APK
+      run: |
+        mkdir -p output
+        if [ -f "${{ steps.sign_apk.outputs.signedReleaseFile }}" ]; then
+          cp "${{ steps.sign_apk.outputs.signedReleaseFile }}" "output/app-arm64-v8a-release.apk"
+        else
+          cp OllamaServer/android/app/build/outputs/apk/release/app-arm64-v8a-release-unsigned.apk output/app-arm64-v8a-release.apk
+        fi
+        ls -lh output/
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-arm64-v8a-release
+        path: output/app-arm64-v8a-release.apk
+
+    - name: Create Release
+      if: github.event_name == 'workflow_dispatch'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ollama-${{ env.OLLAMA_VERSION }}-android
+        name: OllamaServer with Ollama ${{ env.OLLAMA_VERSION }}
+        body: |
+          OllamaServer APK built with Ollama ${{ env.OLLAMA_VERSION }} for Android ARM64
+          
+          ## Installation
+          1. Download `app-arm64-v8a-release.apk`
+          2. Install on your Android device
+          3. Start Ollama service from the app
+          
+          ## Build Info
+          - Ollama Version: ${{ env.OLLAMA_VERSION }}
+          - Target Architecture: arm64-v8a
+          - Android API Level: ${{ env.ANDROID_API_LEVEL }}
+          - Build Date: ${{ github.event.head_commit.timestamp }}
+        files: |
+          output/app-arm64-v8a-release.apk
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
